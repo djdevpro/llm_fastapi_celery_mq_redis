@@ -1,11 +1,11 @@
-# 🚀 LLM Stream + RabbitMQ
+# 🚀 LLM Stream API
 
-> **Scalez votre API LLM de 50 à 1000+ requêtes simultanées** grâce au découplage via RabbitMQ.
+> **Scalez votre API LLM** avec Celery + Redis ou RabbitMQ.
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.124-green.svg)](https://fastapi.tiangolo.com)
+[![Celery](https://img.shields.io/badge/Celery-5.4-green.svg)](https://docs.celeryq.dev)
 [![Docker](https://img.shields.io/badge/Docker-ready-blue.svg)](https://docker.com)
-[![Tests](https://img.shields.io/badge/tests-8%2F8%20passed-success.svg)](#-tests)
 
 ## 🎯 Le problème résolu
 
@@ -13,107 +13,92 @@ Votre API LLM lag quand plusieurs utilisateurs envoient des requêtes simultané
 
 **Cette architecture résout le problème** en découplant le traitement :
 - L'API retourne **immédiatement** (~100ms)
-- Les workers LLM traitent les requêtes **en parallèle**
+- Les workers traitent les requêtes **en parallèle**
 - Le client reçoit la réponse via **Server-Sent Events**
 
-## 📊 Benchmarks réels
+---
 
-Tests exécutés avec 5 workers LLM :
+## 🔄 Deux modes disponibles
 
-| Métrique | Résultat |
-|----------|----------|
-| Temps de réponse API | **103ms** (fire & forget) |
-| 5 requêtes parallèles | **50s** au lieu de 250s séquentiel |
-| Gain de parallélisme | **5.0x** |
-| Mode async vs sync | **13x** plus rapide pour libérer le serveur |
-| Burst 10 requêtes | Absorbé en **613ms** |
+| Mode | Backend | Avantages |
+|------|---------|-----------|
+| **Celery** (recommandé) | Redis | Rate limiting, retry auto, priorités, monitoring |
+| **RabbitMQ** | RabbitMQ | Legacy, simple |
 
+```bash
+# Choisir le mode dans .env
+MODE=celery    # ou rabbitmq
 ```
-┌──────────────────────────────────────────────────┐
-│  RÉSULTATS DES TESTS                             │
-├──────────────────────────────────────────────────┤
-│  Temps total (5 req):   49.99s                   │
-│  Si séquentiel:         249.07s                  │
-│  Gain parallélisme:     5.0x ✅                  │
-└──────────────────────────────────────────────────┘
-```
-
-## ✨ Fonctionnalités
-
-- 🚀 **Streaming LLM** via OpenAI API (gpt-4o-mini)
-- 📡 **RabbitMQ** pour le découplage producteur/consommateur
-- 🔄 **SSE** (Server-Sent Events) pour le streaming temps réel
-- 🐳 **Docker** avec auto-scaling des workers
-- ⚙️ **Configuration via ENV** : ajustez workers selon la charge
-- 🧪 **Tests pytest** : 8/8 tests validant le parallélisme
 
 ---
 
 ## 📐 Architecture
 
-### Mode Synchrone (`/chat`) — Compatibilité
+### Mode Celery + Redis (recommandé) ⚡
 
 ```
-Client ──POST /chat──► FastAPI ──appel OpenAI──► Réponse (bloque 10-60s)
+┌─────────────┐    POST /chat/async    ┌─────────────────┐
+│   Client    │ ─────────────────────► │    FastAPI      │
+│             │ ◄── task_id, session ─ │   (main_celery) │
+└──────┬──────┘                        └────────┬────────┘
+       │                                        │
+       │                                        ▼
+       │ SSE                           ┌─────────────────┐
+       │                               │     Redis       │
+       │                               │  - Broker       │
+       │                               │  - Pub/Sub      │
+       │                               │  - Rate limit   │
+       │                               └────────┬────────┘
+       │                                        │
+       │                               ┌────────┴────────┐
+       │                               ▼        ▼        ▼
+       │                            Celery   Celery   Celery
+       │                            Worker   Worker   Worker
+       │                               │        │        │
+       │ GET /stream/{session_id}      └────────┴────────┘
+       │                                        │
+       └────────────────────────────────────────┘
+                                          chunks SSE
 ```
 
-### Mode Asynchrone (`/chat/async`) — Production ⚡
+### Avantages Celery vs RabbitMQ brut
 
-```
-┌─────────────┐    POST /chat/async   ┌─────────────────┐
-│   Client    │ ────────────────────► │    FastAPI      │
-│             │ ◄── session_id ────── │   (~100ms) ✅   │
-└──────┬──────┘                       └────────┬────────┘
-       │                                       │
-       │                                       ▼
-       │ SSE                          ┌─────────────────┐
-       │                              │    RabbitMQ     │
-       │                              │   (llm_tasks)   │
-       │                              └────────┬────────┘
-       │                                       │
-       │                              ┌────────┴────────┐
-       │                              ▼        ▼        ▼
-       │                           Worker   Worker   Worker
-       │                           LLM #1   LLM #2   LLM #N
-       │                              │        │        │
-       │ GET /stream/{id}             └────────┴────────┘
-       │                                       │
-       └───────────────────────────────────────┘
-                                         chunks SSE
-```
-
-### Comparaison des modes
-
-| Aspect | `/chat` (sync) | `/chat/async` |
-|--------|----------------|---------------|
-| Latence HTTP | 10-60s (bloqué) | **~100ms** |
-| Workers HTTP | 1 occupé par requête | Libéré instantanément |
-| Scalabilité | Limitée | **Horizontale** |
-| Use case | Dev/tests | **Production** |
+| Feature | RabbitMQ brut | Celery |
+|---------|---------------|--------|
+| Retry automatique | ❌ À coder | ✅ `autoretry_for` |
+| Backoff exponentiel | ❌ À coder | ✅ `retry_backoff=True` |
+| Rate limiting | ❌ À coder | ✅ `rate_limit="100/m"` |
+| Priorité des tâches | ❌ À coder | ✅ `queue="high"` |
+| Timeout | ❌ À coder | ✅ `task_time_limit=300` |
+| Tracking état | ❌ À coder | ✅ `AsyncResult.status` |
+| Monitoring | ❌ Rien | ✅ Flower |
 
 ---
 
 ## ⚙️ Variables d'environnement
 
-| Variable | Description | Défaut | Requis |
-|----------|-------------|--------|--------|
-| `OPENAI_API_KEY` | Clé API OpenAI | - | ✅ |
-| `RABBIT_MQ` | URL RabbitMQ (CloudAMQP ou local) | - | ✅ |
-| `UVICORN_WORKERS` | Workers HTTP (routing) | `4` | ❌ |
-| `LLM_WORKERS` | Workers LLM (traitement OpenAI) | `3` | ❌ |
-| `PORT` | Port de l'API | `8007` | ❌ |
-
-### Exemple `.env`
-
 ```env
 # === REQUIS ===
 OPENAI_API_KEY=sk-proj-xxxxx
+
+# === MODE (celery ou rabbitmq) ===
+MODE=celery
+
+# === REDIS (pour mode celery) ===
+REDIS_URL=redis://redis:6379/0
+
+# === RABBITMQ (pour mode rabbitmq, distant CloudAMQP) ===
 RABBIT_MQ=amqps://user:pass@coral.rmq.cloudamqp.com/vhost
 
-# === SCALING (optionnel) ===
-UVICORN_WORKERS=4   # Workers HTTP
-LLM_WORKERS=5       # Workers LLM (1 worker = 1 requête OpenAI en parallèle)
+# === SCALING ===
+UVICORN_WORKERS=4       # Workers HTTP
+CELERY_CONCURRENCY=4    # Workers Celery (mode celery)
+LLM_WORKERS=3           # Workers LLM (mode rabbitmq)
 PORT=8007
+
+# === RATE LIMITING ===
+LLM_RPM=500             # Requests per minute
+LLM_TPM=100000          # Tokens per minute
 ```
 
 ---
@@ -124,22 +109,17 @@ PORT=8007
 
 ```bash
 cp .env.example .env
-# Éditer avec vos clés OpenAI et RabbitMQ
+# Éditer avec vos clés
 ```
 
-### 2. Build & Run
+### 2. Docker Compose (recommandé)
 
 ```bash
-# Option 1 : Script
-./run.sh start
+# Mode Celery (défaut)
+docker-compose up -d
 
-# Option 2 : Docker manuel
-docker build -t llm-fastapi-mq .
-docker run -d --name llm-mq-poc \
-  -p 8007:8007 \
-  -e LLM_WORKERS=5 \
-  --env-file .env \
-  llm-fastapi-mq
+# Vérifier les logs
+docker-compose logs -f llm-api
 ```
 
 ### 3. Vérification
@@ -147,135 +127,96 @@ docker run -d --name llm-mq-poc \
 ```bash
 # Health check
 curl http://localhost:8007/health/full
-# ✅ {"status":"ok","rabbitmq":"connected","openai":"configured"}
 
-# Logs de démarrage
-docker logs llm-mq-poc
-# ========================================
-#   LLM FastAPI + RabbitMQ
-# ========================================
-#   Uvicorn workers: 4
-#   LLM workers:     5
-# ========================================
+# Mode Celery :
+# {"status":"ok","redis":"connected","celery_workers":"active","openai":"configured"}
+
+# Mode RabbitMQ :
+# {"status":"ok","rabbitmq":"connected","openai":"configured"}
 ```
 
 ---
 
 ## 📡 API Endpoints
 
+### Mode Celery (`main_celery.py`)
+
 | Méthode | Endpoint | Description |
 |---------|----------|-------------|
-| `GET` | `/health` | Health check basique |
-| `GET` | `/health/full` | Statut RabbitMQ + OpenAI |
-| `GET` | `/stats` | Tâches en attente |
-| `POST` | `/chat` | Mode sync (legacy) |
-| `POST` | `/chat/async` | **Mode async (recommandé)** ⚡ |
-| `GET` | `/stream/{session_id}` | Stream SSE des chunks |
+| `GET` | `/health` | Health check |
+| `GET` | `/health/full` | Statut Redis + Celery + OpenAI |
+| `POST` | `/chat` | Mode sync (streaming direct) |
+| `POST` | `/chat/async` | **Mode async (Celery task)** ⚡ |
+| `GET` | `/chat/{task_id}` | Status d'une tâche Celery |
+| `GET` | `/stream/{session_id}` | Stream SSE depuis Redis |
+| `POST` | `/embeddings` | Batch embeddings async |
+| `GET` | `/stats` | Stats queues + workers |
 
-### Exemple : Mode Async (recommandé)
+### Mode RabbitMQ (`main.py`)
+
+| Méthode | Endpoint | Description |
+|---------|----------|-------------|
+| `GET` | `/health` | Health check |
+| `GET` | `/health/full` | Statut RabbitMQ + OpenAI |
+| `POST` | `/chat` | Mode sync (streaming) |
+| `POST` | `/chat/async` | Mode async (RabbitMQ) |
+| `GET` | `/stream/{session_id}` | Stream SSE depuis RabbitMQ |
+| `GET` | `/stats` | Tâches en attente |
+
+### Exemple : Mode Celery
 
 ```bash
-# 1. Envoie la requête → retour immédiat (~100ms)
+# 1. Envoie la requête → retour immédiat
 curl -X POST http://localhost:8007/chat/async \
   -H "Content-Type: application/json" \
-  -d '{"message": "Explique Docker en 3 points"}'
+  -d '{"message": "Explique Docker", "priority": 5}'
 
-# Réponse instantanée :
-# {"status":"queued","session_id":"abc-123","stream_url":"/stream/abc-123"}
+# Réponse :
+# {
+#   "status": "queued",
+#   "task_id": "abc-123",
+#   "session_id": "xyz-456",
+#   "stream_url": "/stream/xyz-456"
+# }
 
-# 2. Écoute le stream SSE
-curl -N http://localhost:8007/stream/abc-123
-# data: {"chunk": "Docker"}
-# data: {"chunk": " est"}
-# data: {"chunk": " un"}
-# ...
-# data: {"type": "done"}
+# 2. Vérifier le status de la tâche
+curl http://localhost:8007/chat/abc-123
+
+# 3. Écouter le stream SSE
+curl -N http://localhost:8007/stream/xyz-456
+# data: {"type":"status","status":"started"}
+# data: {"type":"chunk","content":"Docker"}
+# data: {"type":"chunk","content":" est"}
+# data: {"type":"complete"}
 ```
 
 ---
 
 ## 🧪 Tests
 
-8 tests pytest validant le parallélisme :
-
 ```bash
-# Dans le conteneur Docker
-docker exec llm-mq-poc pytest tests/ -v -s
+# Tests mode Celery
+pytest tests/test_celery.py -v -s
 
-# Ou localement
-pip install pytest pytest-asyncio httpx
+# Tests mode RabbitMQ
+pytest tests/test_concurrent.py -v -s
+
+# Tous les tests
 pytest tests/ -v -s
 ```
 
-### Résultats des tests
-
-```
-tests/test_concurrent.py::TestHealthCheck::test_health ✅
-tests/test_concurrent.py::TestHealthCheck::test_health_full ✅
-tests/test_concurrent.py::TestAsyncMode::test_chat_async_returns_immediately ✅ (103ms)
-tests/test_concurrent.py::TestAsyncMode::test_stream_receives_chunks ✅
-tests/test_concurrent.py::TestParallelProcessing::test_parallel_5_requests ✅ (5.0x gain)
-tests/test_concurrent.py::TestParallelProcessing::test_compare_sync_vs_async ✅ (13x)
-tests/test_concurrent.py::TestLoadCapacity::test_queue_stats ✅
-tests/test_concurrent.py::TestLoadCapacity::test_burst_10_requests ✅ (613ms)
-
-========================= 8 passed in 92.44s =========================
-```
-
----
-
-## 📊 Scaling
-
-### Formule du nombre de workers LLM
-
-```
-LLM_WORKERS = (requêtes/minute) × (temps moyen génération en minutes)
-
-Exemple :
-- 60 requêtes/minute attendues
-- 30 secondes par génération (0.5 min)
-- Workers = 60 × 0.5 = 30 workers
-```
-
-### Configurations recommandées
-
-| Charge | LLM_WORKERS | UVICORN_WORKERS | RAM |
-|--------|-------------|-----------------|-----|
-| Dev | 2 | 1 | 512 MB |
-| Petit (10 users) | 5 | 2 | 1 GB |
-| Moyen (50 users) | 15 | 4 | 2 GB |
-| Production (100+ users) | 30-50 | 4 | 4-8 GB |
-
-### Lancer avec plus de workers
+### Prérequis pour les tests
 
 ```bash
-docker run -d --name llm-prod \
-  -p 8007:8007 \
-  -e LLM_WORKERS=30 \
-  -e UVICORN_WORKERS=4 \
-  --env-file .env \
-  llm-fastapi-mq
+# Mode Celery
+docker-compose up -d redis
+celery -A celery_app worker --loglevel=info -c 4
+uvicorn main_celery:app --port 8007
+
+# Mode RabbitMQ
+# RabbitMQ distant (CloudAMQP)
+uvicorn main:app --port 8007
 ```
-
----
-
-## 🖥️ Interface Web
-
-```bash
-# Windows
-start chat.html
-
-# macOS / Linux
-open chat.html
-# ou
-python -m http.server 3000 && open http://localhost:3000/chat.html
-```
-
-**Fonctionnalités :**
-- 💬 Chat temps réel avec streaming
-- 🔄 Switch mode RabbitMQ / Direct
-- 📊 Indicateurs de statut (API, Queue, Stream)
-- 📱 Design responsive
 
 ---
 
@@ -283,76 +224,130 @@ python -m http.server 3000 && open http://localhost:3000/chat.html
 
 ```
 llm_fastapi_mq/
-├── main.py                 # API FastAPI
+├── main.py                 # API FastAPI (mode RabbitMQ)
+├── main_celery.py          # API FastAPI (mode Celery) ⚡
+├── celery_app.py           # Configuration Celery
 ├── config.py               # Variables d'environnement
-├── Dockerfile              # Image multi-workers
-├── entrypoint.sh           # Lance API + Workers auto
-├── chat.html               # Interface web
+├── Dockerfile
+├── docker-compose.yml
+├── entrypoint.sh           # Lance API + Workers (auto-détecte le mode)
+├── chat.html               # Interface web (3 modes)
 ├── services/
 │   ├── connection_pool.py  # Pool connexions RabbitMQ
-│   ├── llm_worker.py       # Worker LLM (scalable)
-│   ├── rabbit_publisher.py # Publisher
-│   └── rabbit_consumer.py  # Consumer SSE
+│   ├── llm_worker.py       # Worker LLM (mode RabbitMQ)
+│   ├── rabbit_publisher.py
+│   └── rabbit_consumer.py
+├── tasks/
+│   ├── __init__.py
+│   └── llm_tasks.py        # Tâches Celery (rate limiting, retry)
 └── tests/
-    ├── conftest.py         # Config pytest
-    └── test_concurrent.py  # Tests parallélisme
+    ├── conftest.py
+    ├── test_celery.py      # Tests mode Celery
+    └── test_concurrent.py  # Tests mode RabbitMQ
 ```
+
+---
+
+## 🖥️ Interface Web
+
+```bash
+# Ouvrir chat.html dans le navigateur
+open chat.html
+```
+
+**3 modes disponibles :**
+- 🟢 **Celery** — Streaming via Redis pub/sub
+- 🔵 **RabbitMQ** — Streaming via RabbitMQ
+- ⚡ **Direct** — Streaming HTTP direct
+
+---
+
+## 📊 Scaling
+
+### Mode Celery
+
+```bash
+# Plus de workers Celery
+CELERY_CONCURRENCY=8
+
+# Ou lancer plusieurs workers
+celery -A celery_app worker -c 4 -Q high,default &
+celery -A celery_app worker -c 4 -Q low &
+```
+
+### Mode RabbitMQ
+
+```bash
+# Plus de workers LLM
+LLM_WORKERS=10
+```
+
+### Configurations recommandées
+
+| Charge | CELERY_CONCURRENCY | UVICORN_WORKERS |
+|--------|-------------------|-----------------|
+| Dev | 2 | 1 |
+| Petit (10 users) | 4 | 2 |
+| Moyen (50 users) | 8 | 4 |
+| Production (100+) | 16-32 | 4 |
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Requêtes traitées séquentiellement
+### Redis non connecté
 
 ```bash
-# Vérifier les workers actifs
-docker top llm-mq-poc | grep llm_worker
+# Vérifier que Redis tourne
+docker-compose ps redis
 
-# Augmenter si nécessaire
-docker run -e LLM_WORKERS=10 ...
+# Vérifier l'URL Redis
+echo $REDIS_URL
+# Doit être redis://redis:6379/0 dans Docker
 ```
 
-### Erreur connexion RabbitMQ
+### Celery workers inactifs
 
 ```bash
-# Plan CloudAMQP gratuit = 20 connexions max
-# Réduire les workers
-docker run -e LLM_WORKERS=3 -e UVICORN_WORKERS=2 ...
+# Vérifier les workers
+celery -A celery_app inspect active
+
+# Voir les queues
+celery -A celery_app inspect reserved
 ```
 
-### Erreur OpenAI (caractères Windows)
+### Erreur caractères Windows
 
 ```bash
 # Nettoyer les \r du .env
 sed -i 's/\r$//' .env
 ```
 
-### Monitoring
+### Port déjà utilisé
 
 ```bash
-# Tâches en attente
-curl http://localhost:8007/stats
-# {"pending_tasks":5,"queue":"llm_tasks","status":"ok"}
+# Trouver le processus
+netstat -ano | findstr :8007
 
-# Health complet
-curl http://localhost:8007/health/full
+# Ou changer le port dans .env
+PORT=8008
 ```
+
+---
+
+## 🔜 Roadmap
+
+- [ ] Quotas par utilisateur
+- [ ] Budget tracking (cost per user)
+- [ ] Multi-provider fallback (OpenAI → Anthropic → Ollama)
+- [ ] Celery Beat pour jobs planifiés
+- [ ] Flower pour monitoring
 
 ---
 
 ## 📄 License
 
 MIT
-
----
-
-## 🤝 Contribution
-
-1. Fork le projet
-2. Créer une branche (`git checkout -b feature/amazing`)
-3. Commit (`git commit -m 'Add amazing feature'`)
-4. Push (`git push origin feature/amazing`)
-5. Ouvrir une Pull Request
 
 ---
 
