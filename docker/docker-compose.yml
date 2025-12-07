@@ -10,7 +10,9 @@ services:
     env_file:
       - ../.env
     environment:
+      - BROKER=${BROKER:-redis}
       - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=${RABBITMQ_URL:-}
     ports:
       - "${PORT:-8007}:${PORT:-8007}"
     depends_on:
@@ -29,7 +31,9 @@ services:
     env_file:
       - ../.env
     environment:
+      - BROKER=${BROKER:-redis}
       - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=${RABBITMQ_URL:-}
       - CELERY_CONCURRENCY=${CELERY_CONCURRENCY:-4}
       - CELERY_QUEUES=high,default,low
       - CELERY_LOGLEVEL=info
@@ -53,7 +57,9 @@ services:
     env_file:
       - ../.env
     environment:
+      - BROKER=${BROKER:-redis}
       - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=${RABBITMQ_URL:-}
       - CELERY_CONCURRENCY=2
       - CELERY_QUEUES=high
       - CELERY_LOGLEVEL=info
@@ -65,7 +71,7 @@ services:
       - priority
 
   # ===========================================
-  # Redis
+  # Redis (toujours requis pour pub/sub + results)
   # ===========================================
   redis:
     image: redis:7-alpine
@@ -87,7 +93,7 @@ services:
     image: mher/flower:2.0
     container_name: llm-flower
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=${BROKER:-redis}://redis:6379/0
       - FLOWER_PORT=5555
     ports:
       - "5555:5555"
