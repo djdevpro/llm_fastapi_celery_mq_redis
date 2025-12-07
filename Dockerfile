@@ -18,8 +18,18 @@ COPY . .
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8007
+# ============================================================
+# Configuration via variables d'environnement
+# ============================================================
+# Workers HTTP (uvicorn) - gère les requêtes entrantes
+ENV UVICORN_WORKERS=4
+
+# Workers LLM - traite les tâches OpenAI depuis RabbitMQ
+ENV LLM_WORKERS=3
+
+# Port de l'API
+ENV PORT=8007
+
+EXPOSE ${PORT}
 
 ENTRYPOINT ["/entrypoint.sh"]
-# Force asyncio loop au lieu de uvloop
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8007", "--loop", "asyncio"]
