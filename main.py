@@ -1,20 +1,58 @@
+"""
+FastAPI LLM Streaming avec RabbitMQ - Architecture scalable.
+
+Deux modes disponibles :
+1. /chat (ancien) - Traitement synchrone, streaming direct
+2. /chat/async (nouveau) - Fire-and-forget, traité par workers
+"""
 import os
 import uuid
 import json
 import logging
 from openai import OpenAI
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
+
 from services.rabbit_publisher import RabbitPublisher
 from services.rabbit_consumer import RabbitConsumer
+from services.connection_pool import get_pool
 from config import OPENAI_API_KEY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("llm-mq")
 
-app = FastAPI(title="LLM Streaming + RabbitMQ")
+# Queue des tâches pour les workers
+TASK_QUEUE = "llm_tasks"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gestion du cycle de vie - connexions partagées."""
+    logger.info("Démarrage de l'application...")
+    # Initialise le pool au démarrage
+    try:
+        pool = get_pool()
+        logger.info("Pool RabbitMQ prêt")
+    except Exception as e:
+        logger.warning(f"RabbitMQ non disponible au démarrage: {e}")
+    
+    yield
+    
+    # Cleanup à l'arrêt
+    logger.info("Arrêt de l'application...")
+    try:
+        get_pool().close()
+    except:
+        pass
+
+
+app = FastAPI(
+    title="LLM Streaming + RabbitMQ (Scalable)",
+    lifespan=lifespan
+)
 
 # CORS pour le client HTML
 app.add_middleware(
@@ -26,24 +64,48 @@ app.add_middleware(
     expose_headers=["X-Session-ID"],
 )
 
-# Client GLOBAL créé au démarrage
+# Client OpenAI global
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
-logger.info("OpenAI client created at startup")
+logger.info("OpenAI client créé")
 
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+    model: str = "gpt-4o-mini"
 
+
+# ============================================================
+# ENDPOINTS SANTÉ
+# ============================================================
 
 @app.get("/health")
 def health():
+    """Health check basique."""
     return {"status": "ok"}
+
+
+@app.get("/health/full")
+def health_full():
+    """Health check complet avec statut RabbitMQ."""
+    rabbit_ok = False
+    try:
+        pool = get_pool()
+        with pool.channel() as ch:
+            rabbit_ok = ch.is_open
+    except:
+        pass
+    
+    return {
+        "status": "ok" if rabbit_ok else "degraded",
+        "rabbitmq": "connected" if rabbit_ok else "disconnected",
+        "openai": "configured" if OPENAI_API_KEY else "missing"
+    }
 
 
 @app.get("/test", response_class=PlainTextResponse)
 def test_openai():
-    """Test OpenAI avec client global"""
+    """Test rapide OpenAI."""
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
@@ -56,9 +118,16 @@ def test_openai():
         return f"ERROR: {e}"
 
 
+# ============================================================
+# MODE SYNCHRONE (ancien) - Pour compatibilité
+# ============================================================
+
 @app.post("/chat")
-def chat(request: ChatRequest):
-    """Chat avec streaming + RabbitMQ"""
+def chat_sync(request: ChatRequest):
+    """
+    Chat avec streaming synchrone + publication RabbitMQ.
+    Mode compatibilité - utilise /chat/async pour plus de charge.
+    """
     session_id = request.session_id or str(uuid.uuid4())
     
     def generate():
@@ -71,7 +140,7 @@ def chat(request: ChatRequest):
 
         try:
             stream = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=request.model,
                 messages=[
                     {"role": "system", "content": "Tu es un assistant utile et concis."},
                     {"role": "user", "content": request.message}
@@ -104,9 +173,65 @@ def chat(request: ChatRequest):
     )
 
 
+# ============================================================
+# MODE ASYNCHRONE (nouveau) - Fire-and-forget pour haute charge
+# ============================================================
+
+@app.post("/chat/async")
+def chat_async(request: ChatRequest):
+    """
+    Chat asynchrone - Fire-and-forget.
+    
+    1. Envoie la tâche dans RabbitMQ
+    2. Retourne immédiatement avec le session_id
+    3. Le client écoute sur /stream/{session_id}
+    
+    Avantages :
+    - Libère le worker HTTP instantanément
+    - Traitement par workers LLM dédiés
+    - Scale horizontalement
+    """
+    session_id = request.session_id or str(uuid.uuid4())
+    
+    task = {
+        "session_id": session_id,
+        "message": request.message,
+        "model": request.model
+    }
+    
+    try:
+        pool = get_pool()
+        pool.publish(
+            queue=TASK_QUEUE,
+            message=json.dumps(task).encode(),
+            declare=True
+        )
+        logger.info(f"Tâche envoyée: {session_id[:8]}...")
+        
+        return JSONResponse(
+            content={
+                "status": "queued",
+                "session_id": session_id,
+                "stream_url": f"/stream/{session_id}"
+            },
+            headers={"X-Session-ID": session_id}
+        )
+        
+    except Exception as e:
+        logger.error(f"Erreur queue: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"RabbitMQ indisponible: {e}"
+        )
+
+
+# ============================================================
+# STREAMING SSE (consommation des réponses)
+# ============================================================
+
 @app.get("/stream/{session_id}")
 async def stream_from_mq(session_id: str):
-    """SSE depuis RabbitMQ"""
+    """SSE depuis RabbitMQ - Consomme les chunks d'une session."""
     async def events():
         consumer = RabbitConsumer(session_id)
         consumer.connect()
@@ -122,6 +247,33 @@ async def stream_from_mq(session_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
     )
+
+
+# ============================================================
+# STATS (monitoring)
+# ============================================================
+
+@app.get("/stats")
+def get_stats():
+    """Statistiques des queues RabbitMQ."""
+    try:
+        pool = get_pool()
+        with pool.channel() as ch:
+            # Déclare passivement pour obtenir le count
+            result = ch.queue_declare(queue=TASK_QUEUE, passive=True)
+            pending_tasks = result.method.message_count
+            
+            return {
+                "pending_tasks": pending_tasks,
+                "queue": TASK_QUEUE,
+                "status": "ok"
+            }
+    except Exception as e:
+        return {
+            "pending_tasks": -1,
+            "error": str(e),
+            "status": "error"
+        }
 
 
 if __name__ == "__main__":
