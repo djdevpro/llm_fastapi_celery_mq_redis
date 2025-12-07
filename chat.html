@@ -621,12 +621,16 @@
             </div>
             <div class="header-title">
                 <h1>LLM Stream</h1>
-                <span class="header-subtitle">Streaming via RabbitMQ</span>
+                <span class="header-subtitle">Celery + Redis / RabbitMQ</span>
             </div>
         </div>
 
         <div class="mode-toggle">
-            <button class="mode-btn active" data-mode="sse">
+            <button class="mode-btn active" data-mode="celery">
+                <i data-lucide="layers"></i>
+                Celery
+            </button>
+            <button class="mode-btn" data-mode="rabbitmq">
                 <i data-lucide="radio"></i>
                 RabbitMQ
             </button>
@@ -659,7 +663,7 @@
             </div>
             <div class="empty-state-text">
                 <div class="empty-state-title">Démarre une conversation</div>
-                <div class="empty-state-subtitle">Les réponses arrivent en streaming via RabbitMQ</div>
+                <div class="empty-state-subtitle">Streaming via Celery/Redis ou RabbitMQ</div>
             </div>
         </div>
     </main>
@@ -685,7 +689,7 @@
         lucide.createIcons();
 
         const API_URL = 'http://localhost:8007';
-        let currentMode = 'sse';
+        let currentMode = 'celery';
 
         const messagesEl = document.getElementById('messages');
         const emptyState = document.getElementById('emptyState');
@@ -701,6 +705,7 @@
                 document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 currentMode = btn.dataset.mode;
+                console.log('Mode:', currentMode);
             });
         });
 
@@ -802,8 +807,10 @@
             addMessage(message, 'user');
             addTypingIndicator();
 
-            if (currentMode === 'sse') {
-                await sendWithSSE(message);
+            if (currentMode === 'celery') {
+                await sendWithCelery(message);
+            } else if (currentMode === 'rabbitmq') {
+                await sendWithRabbitMQ(message);
             } else {
                 await sendDirect(message);
             }
@@ -815,7 +822,8 @@
             streamStatus.className = 'status-dot ok';
         }
 
-        async function sendWithSSE(message) {
+        // Mode Celery + Redis
+        async function sendWithCelery(message) {
             try {
                 const res = await fetch(`${API_URL}/chat/async`, {
                     method: 'POST',
@@ -823,7 +831,77 @@
                     body: JSON.stringify({ message })
                 });
 
-                const sessionId = res.headers.get('X-Session-ID');
+                const data = await res.json();
+                const sessionId = data.session_id;
+                
+                if (!sessionId) {
+                    removeTypingIndicator();
+                    addMessage('Erreur: Session manquante', 'assistant');
+                    return;
+                }
+
+                console.log('Celery task:', data.task_id, 'Session:', sessionId);
+
+                removeTypingIndicator();
+                const bubble = addMessage('', 'assistant', 'Celery');
+                bubble.classList.add('streaming');
+                let fullText = '';
+
+                const eventSource = new EventSource(`${API_URL}/stream/${sessionId}`);
+
+                eventSource.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    
+                    // Celery envoie "content" pour les chunks
+                    if (data.content) {
+                        fullText += data.content;
+                        bubble.textContent = fullText;
+                        messagesEl.scrollTop = messagesEl.scrollHeight;
+                    }
+                    
+                    // Celery envoie "complete" ou "error" pour la fin
+                    if (data.type === 'complete' || data.type === 'error' || data.type === 'timeout') {
+                        bubble.classList.remove('streaming');
+                        eventSource.close();
+                        if (data.type === 'error') {
+                            bubble.textContent = fullText || `Erreur: ${data.error}`;
+                        }
+                        if (data.type === 'timeout') {
+                            bubble.textContent = fullText || 'Timeout: pas de réponse';
+                        }
+                    }
+                };
+
+                eventSource.onerror = () => {
+                    bubble.classList.remove('streaming');
+                    eventSource.close();
+                    if (!fullText) bubble.textContent = 'Erreur de connexion SSE';
+                };
+
+            } catch (err) {
+                removeTypingIndicator();
+                addMessage(`Erreur: ${err.message}`, 'assistant');
+            }
+        }
+
+        // Mode RabbitMQ (legacy)
+        async function sendWithRabbitMQ(message) {
+            try {
+                const res = await fetch(`${API_URL}/chat/async`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                // RabbitMQ utilise le header X-Session-ID
+                let sessionId = res.headers.get('X-Session-ID');
+                
+                // Fallback: essaie le body JSON
+                if (!sessionId) {
+                    const data = await res.json();
+                    sessionId = data.session_id;
+                }
+                
                 if (!sessionId) {
                     removeTypingIndicator();
                     addMessage('Erreur: Session manquante', 'assistant');
@@ -862,6 +940,7 @@
             }
         }
 
+        // Mode Direct (streaming HTTP)
         async function sendDirect(message) {
             try {
                 const res = await fetch(`${API_URL}/chat`, {

@@ -18,18 +18,6 @@ COPY . .
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# ============================================================
-# Configuration via variables d'environnement
-# ============================================================
-# Workers HTTP (uvicorn) - gère les requêtes entrantes
-ENV UVICORN_WORKERS=4
-
-# Workers LLM - traite les tâches OpenAI depuis RabbitMQ
-ENV LLM_WORKERS=3
-
-# Port de l'API
-ENV PORT=8007
-
-EXPOSE ${PORT}
+EXPOSE 8007
 
 ENTRYPOINT ["/entrypoint.sh"]

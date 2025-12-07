@@ -1,0 +1,34 @@
+services:
+  # ===========================================
+  # API LLM (Celery ou RabbitMQ selon MODE)
+  # ===========================================
+  llm-api:
+    build: .
+    container_name: llm-api
+    env_file:
+      - .env
+    ports:
+      - "${PORT}:${PORT}"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ===========================================
+  # Redis (broker Celery + cache) - interne uniquement
+  # ===========================================
+  redis:
+    image: redis:7-alpine
+    container_name: llm-redis
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
