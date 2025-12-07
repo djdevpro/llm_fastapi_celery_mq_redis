@@ -5,11 +5,11 @@ Deux modes disponibles :
 1. /chat (ancien) - Traitement synchrone, streaming direct
 2. /chat/async (nouveau) - Fire-and-forget, traité par workers
 """
-import os
+import asyncio
 import uuid
 import json
 import logging
-from openai import OpenAI
+from openai import AsyncOpenAI
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
@@ -64,8 +64,8 @@ app.add_middleware(
     expose_headers=["X-Session-ID"],
 )
 
-# Client OpenAI global
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# Client OpenAI async global
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 logger.info("OpenAI client créé")
 
 
@@ -80,19 +80,28 @@ class ChatRequest(BaseModel):
 # ============================================================
 
 @app.get("/health")
-def health():
+async def health():
     """Health check basique."""
     return {"status": "ok"}
 
 
 @app.get("/health/full")
-def health_full():
-    """Health check complet avec statut RabbitMQ."""
+async def health_full():
+    """Health check complet avec statut RabbitMQ (timeout 3s)."""
     rabbit_ok = False
     try:
-        pool = get_pool()
-        with pool.channel() as ch:
-            rabbit_ok = ch.is_open
+        def check_rabbit():
+            pool = get_pool()
+            with pool.channel() as ch:
+                return ch.is_open
+        
+        # Timeout de 3 secondes
+        rabbit_ok = await asyncio.wait_for(
+            asyncio.to_thread(check_rabbit),
+            timeout=3.0
+        )
+    except asyncio.TimeoutError:
+        pass
     except:
         pass
     
@@ -104,10 +113,10 @@ def health_full():
 
 
 @app.get("/test", response_class=PlainTextResponse)
-def test_openai():
-    """Test rapide OpenAI."""
+async def test_openai():
+    """Test rapide OpenAI (async)."""
     try:
-        response = openai_client.chat.completions.create(
+        response = await openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": "Hi"}],
             max_tokens=10
@@ -123,23 +132,25 @@ def test_openai():
 # ============================================================
 
 @app.post("/chat")
-def chat_sync(request: ChatRequest):
+async def chat_sync(request: ChatRequest):
     """
     Chat avec streaming synchrone + publication RabbitMQ.
     Mode compatibilité - utilise /chat/async pour plus de charge.
     """
     session_id = request.session_id or str(uuid.uuid4())
     
-    def generate():
+    async def generate():
+        # Connexion RabbitMQ dans un thread
         publisher = RabbitPublisher(session_id)
         try:
-            publisher.connect()
+            await asyncio.to_thread(publisher.connect)
         except Exception as e:
             yield f"[ERROR: RabbitMQ - {e}]"
             return
 
         try:
-            stream = openai_client.chat.completions.create(
+            # Stream OpenAI async
+            stream = await openai_client.chat.completions.create(
                 model=request.model,
                 messages=[
                     {"role": "system", "content": "Tu es un assistant utile et concis."},
@@ -149,22 +160,23 @@ def chat_sync(request: ChatRequest):
             )
 
             full_response = ""
-            for chunk in stream:
+            async for chunk in stream:
                 content = chunk.choices[0].delta.content or ""
                 if content:
                     full_response += content
-                    publisher.publish({"type": "chunk", "chunk": content})
+                    # Publish dans un thread (non bloquant)
+                    await asyncio.to_thread(publisher.publish, {"type": "chunk", "chunk": content})
                     yield content
 
-            publisher.publish({"type": "complete"})
+            await asyncio.to_thread(publisher.publish, {"type": "complete"})
             logger.info(f"Session {session_id} done ({len(full_response)} chars)")
 
         except Exception as e:
             logger.error(f"Stream Error: {e}")
-            publisher.publish({"type": "error", "error": str(e)})
+            await asyncio.to_thread(publisher.publish, {"type": "error", "error": str(e)})
             yield f"[ERROR: {e}]"
         finally:
-            publisher.close()
+            await asyncio.to_thread(publisher.close)
 
     return StreamingResponse(
         generate(),
@@ -178,7 +190,7 @@ def chat_sync(request: ChatRequest):
 # ============================================================
 
 @app.post("/chat/async")
-def chat_async(request: ChatRequest):
+async def chat_async(request: ChatRequest):
     """
     Chat asynchrone - Fire-and-forget.
     
@@ -200,12 +212,16 @@ def chat_async(request: ChatRequest):
     }
     
     try:
-        pool = get_pool()
-        pool.publish(
-            queue=TASK_QUEUE,
-            message=json.dumps(task).encode(),
-            declare=True
-        )
+        # Publie dans un thread pour ne pas bloquer l'event loop
+        def publish_task():
+            pool = get_pool()
+            pool.publish(
+                queue=TASK_QUEUE,
+                message=json.dumps(task).encode(),
+                declare=True
+            )
+        
+        await asyncio.to_thread(publish_task)
         logger.info(f"Tâche envoyée: {session_id[:8]}...")
         
         return JSONResponse(
@@ -234,13 +250,13 @@ async def stream_from_mq(session_id: str):
     """SSE depuis RabbitMQ - Consomme les chunks d'une session."""
     async def events():
         consumer = RabbitConsumer(session_id)
-        consumer.connect()
+        await asyncio.to_thread(consumer.connect)
         try:
             async for chunk in consumer.consume_session():
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         finally:
-            consumer.close()
+            await asyncio.to_thread(consumer.close)
 
     return StreamingResponse(
         events(),
@@ -254,20 +270,37 @@ async def stream_from_mq(session_id: str):
 # ============================================================
 
 @app.get("/stats")
-def get_stats():
-    """Statistiques des queues RabbitMQ."""
+async def get_stats():
+    """Statistiques des queues RabbitMQ (avec timeout)."""
     try:
-        pool = get_pool()
-        with pool.channel() as ch:
-            # Déclare passivement pour obtenir le count
-            result = ch.queue_declare(queue=TASK_QUEUE, passive=True)
-            pending_tasks = result.method.message_count
-            
-            return {
-                "pending_tasks": pending_tasks,
-                "queue": TASK_QUEUE,
-                "status": "ok"
-            }
+        def fetch_stats():
+            pool = get_pool()
+            with pool.channel() as ch:
+                # Déclare la queue (la crée si n'existe pas)
+                result = ch.queue_declare(
+                    queue=TASK_QUEUE,
+                    durable=True,
+                    arguments={"x-message-ttl": 300000}
+                )
+                return result.method.message_count
+        
+        # Timeout de 5 secondes max
+        pending_tasks = await asyncio.wait_for(
+            asyncio.to_thread(fetch_stats),
+            timeout=5.0
+        )
+        
+        return {
+            "pending_tasks": pending_tasks,
+            "queue": TASK_QUEUE,
+            "status": "ok"
+        }
+    except asyncio.TimeoutError:
+        return {
+            "pending_tasks": -1,
+            "error": "timeout",
+            "status": "slow"
+        }
     except Exception as e:
         return {
             "pending_tasks": -1,
