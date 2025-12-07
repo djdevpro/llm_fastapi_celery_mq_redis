@@ -87,21 +87,15 @@ async def health():
 
 @app.get("/health/full")
 async def health_full():
-    """Health check complet avec statut RabbitMQ (timeout 3s)."""
+    """Health check complet avec statut RabbitMQ."""
     rabbit_ok = False
     try:
+        # Exécute l'appel bloquant dans un thread
         def check_rabbit():
             pool = get_pool()
             with pool.channel() as ch:
                 return ch.is_open
-        
-        # Timeout de 3 secondes
-        rabbit_ok = await asyncio.wait_for(
-            asyncio.to_thread(check_rabbit),
-            timeout=3.0
-        )
-    except asyncio.TimeoutError:
-        pass
+        rabbit_ok = await asyncio.to_thread(check_rabbit)
     except:
         pass
     
@@ -271,35 +265,20 @@ async def stream_from_mq(session_id: str):
 
 @app.get("/stats")
 async def get_stats():
-    """Statistiques des queues RabbitMQ (avec timeout)."""
+    """Statistiques des queues RabbitMQ."""
     try:
         def fetch_stats():
             pool = get_pool()
             with pool.channel() as ch:
-                # Déclare la queue (la crée si n'existe pas)
-                result = ch.queue_declare(
-                    queue=TASK_QUEUE,
-                    durable=True,
-                    arguments={"x-message-ttl": 300000}
-                )
+                result = ch.queue_declare(queue=TASK_QUEUE, passive=True)
                 return result.method.message_count
         
-        # Timeout de 5 secondes max
-        pending_tasks = await asyncio.wait_for(
-            asyncio.to_thread(fetch_stats),
-            timeout=5.0
-        )
+        pending_tasks = await asyncio.to_thread(fetch_stats)
         
         return {
             "pending_tasks": pending_tasks,
             "queue": TASK_QUEUE,
             "status": "ok"
-        }
-    except asyncio.TimeoutError:
-        return {
-            "pending_tasks": -1,
-            "error": "timeout",
-            "status": "slow"
         }
     except Exception as e:
         return {
