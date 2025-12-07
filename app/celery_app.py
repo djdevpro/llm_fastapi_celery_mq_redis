@@ -2,21 +2,18 @@
 Configuration Celery avec Redis.
 
 Lancer le worker :
-    celery -A celery_app worker --loglevel=info --concurrency=4
-
-Lancer le beat (scheduling) :
-    celery -A celery_app beat --loglevel=info
+    celery -A app.celery_app worker --loglevel=info --concurrency=4
 """
 from celery import Celery
 from kombu import Queue
-from config import REDIS_URL
+from app.config import REDIS_URL
 
 # Celery app
 celery = Celery(
     "llm_tasks",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.llm_tasks"]
+    include=["app.tasks.llm_tasks"]
 )
 
 # Configuration
@@ -49,8 +46,8 @@ celery.conf.update(
     
     # Rate limiting global (backup)
     task_annotations={
-        "tasks.llm_tasks.chat_completion": {
-            "rate_limit": "100/m"  # 100 requêtes/min par worker
+        "app.tasks.llm_tasks.chat_completion": {
+            "rate_limit": "100/m"
         }
     },
     
@@ -59,7 +56,10 @@ celery.conf.update(
     task_reject_on_worker_lost=True,
     
     # Concurrency control
-    worker_prefetch_multiplier=1,  # Prend 1 tâche à la fois
+    worker_prefetch_multiplier=1,
+    
+    # Startup retry
+    broker_connection_retry_on_startup=True,
 )
 
 

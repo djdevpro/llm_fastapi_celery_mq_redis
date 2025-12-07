@@ -16,7 +16,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from openai import OpenAI
 import redis
 
-from config import OPENAI_API_KEY, REDIS_URL, LLM_RPM
+from app.config import OPENAI_API_KEY, REDIS_URL, LLM_RPM
 
 logger = logging.getLogger(__name__)
 
@@ -42,34 +42,19 @@ def get_redis():
 
 
 class RateLimiter:
-    """
-    Token bucket rate limiter avec Redis.
-    Partagé entre tous les workers.
-    """
+    """Token bucket rate limiter avec Redis."""
     
     def __init__(self, key: str, rate: int, period: int = 60):
-        """
-        Args:
-            key: Clé Redis unique
-            rate: Nombre de tokens par période
-            period: Période en secondes (défaut: 60s)
-        """
         self.key = f"ratelimit:{key}"
         self.rate = rate
         self.period = period
         self.redis = get_redis()
     
     def acquire(self, tokens: int = 1, timeout: float = 30.0) -> bool:
-        """
-        Acquiert des tokens. Bloque si nécessaire.
-        
-        Returns:
-            True si acquis, False si timeout
-        """
+        """Acquiert des tokens. Bloque si nécessaire."""
         start = time.time()
         
         while time.time() - start < timeout:
-            # Script Lua atomique pour token bucket
             script = """
             local key = KEYS[1]
             local rate = tonumber(ARGV[1])
@@ -86,7 +71,6 @@ class RateLimiter:
                 last_update = tonumber(bucket[4]) or now
             end
             
-            -- Refill tokens based on elapsed time
             local elapsed = now - last_update
             local refill = (elapsed / period) * rate
             tokens = math.min(rate, tokens + refill)
@@ -102,34 +86,28 @@ class RateLimiter:
             """
             
             result = self.redis.eval(
-                script,
-                1,
-                self.key,
-                self.rate,
-                self.period,
-                tokens,
-                time.time()
+                script, 1, self.key,
+                self.rate, self.period, tokens, time.time()
             )
             
             if result == 1:
                 return True
             
-            # Attendre un peu avant de réessayer
             time.sleep(0.1)
         
         return False
 
 
 # Rate limiter global pour OpenAI
-openai_limiter = None
+_openai_limiter = None
 
 
 def get_limiter():
     """Lazy init du rate limiter."""
-    global openai_limiter
-    if openai_limiter is None:
-        openai_limiter = RateLimiter("openai", rate=LLM_RPM, period=60)
-    return openai_limiter
+    global _openai_limiter
+    if _openai_limiter is None:
+        _openai_limiter = RateLimiter("openai", rate=LLM_RPM, period=60)
+    return _openai_limiter
 
 
 @shared_task(
@@ -154,18 +132,7 @@ def chat_completion(
     Tâche Celery pour chat completion.
     
     Publie les chunks en temps réel sur Redis pub/sub.
-    Le client peut s'abonner au channel: llm:stream:{session_id}
-    
-    Args:
-        session_id: ID unique de la session
-        message: Message utilisateur
-        model: Modèle OpenAI
-        system_prompt: Prompt système
-        stream: Activer le streaming
-        user_id: ID utilisateur pour tracking
-        
-    Returns:
-        dict avec response complète et metadata
+    Channel: llm:stream:{session_id}
     """
     redis_client = get_redis()
     channel = f"llm:stream:{session_id}"
@@ -178,29 +145,24 @@ def chat_completion(
     }))
     
     try:
-        # Acquire rate limit (bloque si nécessaire)
+        # Acquire rate limit
         limiter = get_limiter()
         if not limiter.acquire(tokens=1, timeout=30):
             raise Exception("Rate limit timeout - trop de requêtes")
         
         client = get_openai()
-        
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": message}
         ]
         
         if stream:
-            return _stream_completion(
-                client, messages, model, session_id, channel, redis_client
-            )
+            return _stream_completion(client, messages, model, session_id, channel, redis_client)
         else:
-            return _sync_completion(
-                client, messages, model, session_id, channel, redis_client
-            )
+            return _sync_completion(client, messages, model, session_id, channel, redis_client)
             
     except SoftTimeLimitExceeded:
-        logger.warning(f"Task {session_id} approaching time limit")
+        logger.warning(f"Task {session_id} timeout")
         redis_client.publish(channel, json.dumps({
             "type": "error",
             "error": "Timeout: la requête a pris trop de temps"
@@ -218,7 +180,6 @@ def chat_completion(
 
 def _stream_completion(client, messages, model, session_id, channel, redis_client) -> dict:
     """Streaming completion avec publication Redis."""
-    
     stream = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -233,42 +194,32 @@ def _stream_completion(client, messages, model, session_id, channel, redis_clien
         if content:
             full_response += content
             chunks_count += 1
-            
-            # Publie chaque chunk
             redis_client.publish(channel, json.dumps({
                 "type": "chunk",
                 "content": content,
                 "index": chunks_count
             }))
     
-    # Publie "complete"
     redis_client.publish(channel, json.dumps({
         "type": "complete",
         "total_chunks": chunks_count
     }))
     
-    logger.info(f"Session {session_id}: {len(full_response)} chars, {chunks_count} chunks")
+    logger.info(f"Session {session_id}: {len(full_response)} chars")
     
     return {
         "session_id": session_id,
         "response": full_response,
         "model": model,
         "chunks": chunks_count,
-        "tokens_estimate": len(full_response) // 4
     }
 
 
 def _sync_completion(client, messages, model, session_id, channel, redis_client) -> dict:
-    """Completion synchrone (sans streaming)."""
-    
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages
-    )
-    
+    """Completion synchrone."""
+    response = client.chat.completions.create(model=model, messages=messages)
     content = response.choices[0].message.content
     
-    # Publie la réponse complète
     redis_client.publish(channel, json.dumps({
         "type": "complete",
         "content": content
@@ -293,21 +244,13 @@ def batch_embeddings(
     model: str = "text-embedding-3-small",
     user_id: Optional[str] = None,
 ) -> dict:
-    """
-    Tâche pour générer des embeddings en batch.
-    Utile pour RAG, semantic search, etc.
-    """
+    """Génère des embeddings en batch."""
     limiter = get_limiter()
     if not limiter.acquire(tokens=1, timeout=60):
         raise Exception("Rate limit timeout")
     
     client = get_openai()
-    
-    response = client.embeddings.create(
-        model=model,
-        input=texts
-    )
-    
+    response = client.embeddings.create(model=model, input=texts)
     embeddings = [item.embedding for item in response.data]
     
     return {

@@ -1,16 +1,12 @@
 """
-FastAPI + Celery - Architecture scalable pour LLM.
+FastAPI + Celery - API LLM scalable.
 
 Endpoints:
 - POST /chat          → Synchrone (streaming direct)
 - POST /chat/async    → Fire-and-forget (Celery task)
 - GET  /chat/{task_id} → Status d'une tâche
-- GET  /stream/{session_id} → SSE streaming depuis Redis pub/sub
+- GET  /stream/{session_id} → SSE streaming depuis Redis
 - POST /embeddings    → Batch embeddings async
-
-Lancer:
-    uvicorn main_celery:app --reload --port 8007
-    celery -A celery_app worker --loglevel=info -c 4
 """
 import asyncio
 import json
@@ -27,17 +23,15 @@ from openai import AsyncOpenAI
 import redis.asyncio as aioredis
 
 from celery.result import AsyncResult
-from celery_app import celery
-from tasks.llm_tasks import chat_completion, batch_embeddings
-from config import OPENAI_API_KEY, REDIS_URL
+from app.celery_app import celery
+from app.tasks.llm_tasks import chat_completion, batch_embeddings
+from app.config import OPENAI_API_KEY, REDIS_URL
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("llm-celery")
+logger = logging.getLogger("llm-api")
 
-# Redis async client
+# Clients async
 redis_client: Optional[aioredis.Redis] = None
-
-# OpenAI async client
 openai_client: Optional[AsyncOpenAI] = None
 
 
@@ -46,24 +40,21 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown."""
     global redis_client, openai_client
     
-    # Init Redis async
     redis_client = await aioredis.from_url(REDIS_URL, decode_responses=True)
     logger.info("Redis connecté")
     
-    # Init OpenAI async
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     logger.info("OpenAI client prêt")
     
     yield
     
-    # Cleanup
     if redis_client:
         await redis_client.close()
 
 
 app = FastAPI(
-    title="LLM API - Celery + Redis",
-    description="Architecture scalable avec rate limiting et priorités",
+    title="LLM API",
+    description="API LLM scalable avec Celery + Redis",
     version="2.0.0",
     lifespan=lifespan
 )
@@ -88,7 +79,7 @@ class ChatRequest(BaseModel):
     model: str = "gpt-4o-mini"
     system_prompt: str = "Tu es un assistant utile et concis."
     stream: bool = True
-    priority: int = Field(default=0, ge=-10, le=10, description="Priorité (-10 low, 0 default, 10 high)")
+    priority: int = Field(default=0, ge=-10, le=10)
     user_id: Optional[str] = None
 
 
@@ -111,13 +102,11 @@ class TaskResponse(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Health check."""
     return {"status": "ok", "backend": "celery+redis"}
 
 
 @app.get("/health/full")
 async def health_full():
-    """Health check complet."""
     redis_ok = False
     celery_ok = False
     
@@ -128,17 +117,13 @@ async def health_full():
         pass
     
     try:
-        # Check Celery workers
-        inspect = celery.control.inspect()
-        stats = inspect.stats()
+        stats = celery.control.inspect().stats()
         celery_ok = stats is not None and len(stats) > 0
     except:
         pass
     
-    status = "ok" if (redis_ok and celery_ok) else "degraded"
-    
     return {
-        "status": status,
+        "status": "ok" if (redis_ok and celery_ok) else "degraded",
         "redis": "connected" if redis_ok else "disconnected",
         "celery_workers": "active" if celery_ok else "no_workers",
         "openai": "configured" if OPENAI_API_KEY else "missing"
@@ -146,17 +131,12 @@ async def health_full():
 
 
 # ============================================================
-# CHAT SYNCHRONE (streaming direct)
+# CHAT SYNC
 # ============================================================
 
 @app.post("/chat")
 async def chat_sync(request: ChatRequest):
-    """
-    Chat avec streaming synchrone.
-    
-    Pour des cas où le streaming temps réel est critique.
-    Ne passe pas par Celery - exécuté directement.
-    """
+    """Chat avec streaming synchrone (direct, sans Celery)."""
     session_id = request.session_id or str(uuid.uuid4())
     
     async def generate():
@@ -187,35 +167,17 @@ async def chat_sync(request: ChatRequest):
 
 
 # ============================================================
-# CHAT ASYNC (Celery task)
+# CHAT ASYNC (Celery)
 # ============================================================
 
 @app.post("/chat/async", response_model=TaskResponse)
 async def chat_async(request: ChatRequest):
-    """
-    Chat asynchrone via Celery.
-    
-    1. Envoie la tâche dans la queue (avec priorité)
-    2. Retourne immédiatement avec task_id
-    3. Le client écoute sur /stream/{session_id} pour les chunks
-    
-    Avantages:
-    - Rate limiting distribué
-    - Retry automatique
-    - Priorité des tâches
-    - Scalable horizontalement
-    """
+    """Chat asynchrone via Celery."""
     session_id = request.session_id or str(uuid.uuid4())
     
     # Détermine la queue selon priorité
-    if request.priority > 5:
-        queue = "high"
-    elif request.priority < -5:
-        queue = "low"
-    else:
-        queue = "default"
+    queue = "high" if request.priority > 5 else "low" if request.priority < -5 else "default"
     
-    # Envoie la tâche
     task = chat_completion.apply_async(
         kwargs={
             "session_id": session_id,
@@ -226,10 +188,10 @@ async def chat_async(request: ChatRequest):
             "user_id": request.user_id,
         },
         queue=queue,
-        priority=request.priority + 10,  # Celery priority: 0-20
+        priority=request.priority + 10,
     )
     
-    logger.info(f"Task {task.id} queued (session: {session_id}, queue: {queue})")
+    logger.info(f"Task {task.id} queued (queue: {queue})")
     
     return TaskResponse(
         status="queued",
@@ -239,17 +201,9 @@ async def chat_async(request: ChatRequest):
     )
 
 
-# ============================================================
-# TASK STATUS
-# ============================================================
-
 @app.get("/chat/{task_id}")
 async def get_task_status(task_id: str):
-    """
-    Récupère le statut d'une tâche Celery.
-    
-    States: PENDING, STARTED, SUCCESS, FAILURE, RETRY
-    """
+    """Status d'une tâche Celery."""
     result = AsyncResult(task_id, app=celery)
     
     response = {
@@ -263,57 +217,45 @@ async def get_task_status(task_id: str):
             response["result"] = result.result
         else:
             response["error"] = str(result.result)
-    elif result.status == "STARTED":
-        response["info"] = result.info
     
     return response
 
 
 # ============================================================
-# STREAMING SSE (Redis pub/sub)
+# STREAMING SSE
 # ============================================================
 
 @app.get("/stream/{session_id}")
 async def stream_sse(
     session_id: str,
-    timeout: int = Query(default=120, le=300, description="Timeout en secondes")
+    timeout: int = Query(default=120, le=300)
 ):
-    """
-    SSE streaming depuis Redis pub/sub.
-    
-    Le client s'abonne et reçoit les chunks en temps réel
-    publiés par le worker Celery.
-    """
+    """SSE streaming depuis Redis pub/sub."""
     async def event_generator():
         channel = f"llm:stream:{session_id}"
         pubsub = redis_client.pubsub()
         
         try:
             await pubsub.subscribe(channel)
-            logger.info(f"Subscribed to {channel}")
-            
             start_time = asyncio.get_event_loop().time()
             
             async for message in pubsub.listen():
-                # Check timeout
                 if asyncio.get_event_loop().time() - start_time > timeout:
                     yield f"data: {json.dumps({'type': 'timeout'})}\n\n"
                     break
                 
                 if message["type"] == "message":
-                    data = message["data"]
-                    yield f"data: {data}\n\n"
+                    yield f"data: {message['data']}\n\n"
                     
-                    # Parse pour détecter la fin
                     try:
-                        parsed = json.loads(data)
+                        parsed = json.loads(message["data"])
                         if parsed.get("type") in ("complete", "error"):
                             break
                     except:
                         pass
                         
         except asyncio.CancelledError:
-            logger.info(f"Stream {session_id} cancelled")
+            pass
         finally:
             await pubsub.unsubscribe(channel)
             await pubsub.close()
@@ -321,46 +263,28 @@ async def stream_sse(
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Session-ID": session_id
-        }
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
     )
 
 
 # ============================================================
-# EMBEDDINGS ASYNC
+# EMBEDDINGS
 # ============================================================
 
 @app.post("/embeddings")
 async def create_embeddings(request: EmbeddingsRequest):
-    """
-    Génère des embeddings en batch (async).
-    
-    Utile pour RAG, semantic search, etc.
-    """
     if len(request.texts) > 100:
         raise HTTPException(400, "Maximum 100 textes par requête")
     
     task = batch_embeddings.apply_async(
-        kwargs={
-            "texts": request.texts,
-            "model": request.model,
-            "user_id": request.user_id,
-        }
+        kwargs={"texts": request.texts, "model": request.model, "user_id": request.user_id}
     )
     
-    return {
-        "status": "queued",
-        "task_id": task.id,
-        "status_url": f"/embeddings/{task.id}"
-    }
+    return {"status": "queued", "task_id": task.id, "status_url": f"/embeddings/{task.id}"}
 
 
 @app.get("/embeddings/{task_id}")
 async def get_embeddings_result(task_id: str):
-    """Récupère le résultat des embeddings."""
     result = AsyncResult(task_id, app=celery)
     
     if not result.ready():
@@ -373,27 +297,19 @@ async def get_embeddings_result(task_id: str):
 
 
 # ============================================================
-# QUEUE STATS
+# STATS
 # ============================================================
 
 @app.get("/stats")
 async def get_stats():
-    """Statistiques des queues et workers."""
-    stats = {
-        "queues": {},
-        "workers": 0,
-        "status": "ok"
-    }
+    stats = {"queues": {}, "workers": 0, "status": "ok"}
     
     try:
-        # Queue lengths via Redis
         for queue_name in ["high", "default", "low"]:
             length = await redis_client.llen(queue_name)
             stats["queues"][queue_name] = length
         
-        # Worker count
-        inspect = celery.control.inspect()
-        active = inspect.active()
+        active = celery.control.inspect().active()
         if active:
             stats["workers"] = len(active)
             stats["active_tasks"] = sum(len(tasks) for tasks in active.values())
@@ -403,27 +319,6 @@ async def get_stats():
         stats["error"] = str(e)
     
     return stats
-
-
-# ============================================================
-# ADMIN
-# ============================================================
-
-@app.post("/admin/purge/{queue}")
-async def purge_queue(queue: str):
-    """Purge une queue (admin only)."""
-    if queue not in ["high", "default", "low"]:
-        raise HTTPException(400, "Queue invalide")
-    
-    celery.control.purge()
-    return {"status": "purged", "queue": queue}
-
-
-@app.post("/admin/revoke/{task_id}")
-async def revoke_task(task_id: str, terminate: bool = False):
-    """Annule une tâche."""
-    celery.control.revoke(task_id, terminate=terminate)
-    return {"status": "revoked", "task_id": task_id, "terminated": terminate}
 
 
 if __name__ == "__main__":

@@ -1,0 +1,101 @@
+services:
+  # ===========================================
+  # API FastAPI
+  # ===========================================
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: llm-api
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    ports:
+      - "${PORT:-8007}:${PORT:-8007}"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ===========================================
+  # Celery Worker
+  # ===========================================
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: llm-worker
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_CONCURRENCY=${CELERY_CONCURRENCY:-4}
+      - CELERY_QUEUES=high,default,low
+      - CELERY_LOGLEVEL=info
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ===========================================
+  # Celery Worker High Priority (optionnel)
+  # ===========================================
+  worker-high:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: llm-worker-high
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_CONCURRENCY=2
+      - CELERY_QUEUES=high
+      - CELERY_LOGLEVEL=info
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - priority
+
+  # ===========================================
+  # Redis
+  # ===========================================
+  redis:
+    image: redis:7-alpine
+    container_name: llm-redis
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================
+  # Flower (monitoring) - optionnel
+  # ===========================================
+  flower:
+    image: mher/flower:2.0
+    container_name: llm-flower
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - FLOWER_PORT=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+volumes:
+  redis_data:
