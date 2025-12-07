@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Stream</title>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --bg: #f8f9fa;
+            --bg-secondary: #ffffff;
+            --border: #e9ecef;
+            --border-light: #f1f3f5;
+            --text: #212529;
+            --text-secondary: #495057;
+            --text-muted: #868e96;
+            --text-light: #adb5bd;
+            --accent: #212529;
+            --accent-hover: #343a40;
+            --user-bg: #212529;
+            --user-text: #ffffff;
+            --assistant-bg: #f1f3f5;
+            --success: #51cf66;
+            --warning: #fcc419;
+            --error: #ff6b6b;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+            --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* ═══════════════════════════════════════
+           HEADER
+        ═══════════════════════════════════════ */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-secondary);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo {
+            width: 38px;
+            height: 38px;
+            background: var(--accent);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            transition: transform var(--transition), box-shadow var(--transition);
+        }
+
+        .logo:hover {
+            transform: scale(1.05);
+            box-shadow: var(--shadow-md);
+        }
+
+        .logo svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        .header-title {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .header h1 {
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+        }
+
+        .header-subtitle {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        /* Status indicators */
+        .status-indicators {
+            display: flex;
+            gap: 20px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 500;
+            transition: color var(--transition);
+        }
+
+        .status:hover {
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-light);
+            transition: background var(--transition), box-shadow var(--transition);
+        }
+
+        .status-dot.ok { 
+            background: var(--success); 
+            box-shadow: 0 0 0 3px rgba(81, 207, 102, 0.2);
+        }
+        .status-dot.active { 
+            background: var(--warning); 
+            box-shadow: 0 0 0 3px rgba(252, 196, 25, 0.2);
+            animation: pulse 1.2s ease-in-out infinite; 
+        }
+        .status-dot.error { 
+            background: var(--error); 
+            box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.2);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(0.95); }
+        }
+
+        /* Mode Toggle */
+        .mode-toggle {
+            display: flex;
+            background: var(--bg);
+            border-radius: var(--radius-sm);
+            padding: 4px;
+            gap: 4px;
+            border: 1px solid var(--border-light);
+        }
+
+        .mode-btn {
+            padding: 8px 14px;
+            border: none;
+            background: transparent;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all var(--transition);
+            position: relative;
+        }
+
+        .mode-btn svg {
+            width: 14px;
+            height: 14px;
+            transition: transform var(--transition);
+        }
+
+        .mode-btn:hover {
+            color: var(--text-secondary);
+        }
+
+        .mode-btn:hover svg {
+            transform: scale(1.1);
+        }
+
+        .mode-btn.active {
+            background: var(--bg-secondary);
+            color: var(--text);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .mode-btn.active svg {
+            color: var(--accent);
+        }
+
+        /* ═══════════════════════════════════════
+           MESSAGES AREA
+        ═══════════════════════════════════════ */
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 32px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 28px;
+            scroll-behavior: smooth;
+        }
+
+        .message {
+            display: flex;
+            gap: 14px;
+            max-width: 820px;
+            width: 100%;
+            margin: 0 auto;
+            animation: messageIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes messageIn {
+            from { 
+                opacity: 0; 
+                transform: translateY(12px) scale(0.98); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateY(0) scale(1); 
+            }
+        }
+
+        .message.user {
+            flex-direction: row-reverse;
+        }
+
+        /* Avatar */
+        .avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: transform var(--transition);
+        }
+
+        .message:hover .avatar {
+            transform: scale(1.05);
+        }
+
+        .avatar svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        .message.user .avatar {
+            background: var(--accent);
+            color: white;
+        }
+
+        .message.assistant .avatar {
+            background: var(--bg-secondary);
+            border: 1.5px solid var(--border);
+            color: var(--text-secondary);
+        }
+
+        /* Message content */
+        .message-content {
+            flex: 1;
+            max-width: 620px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .message.user .message-content {
+            align-items: flex-end;
+        }
+
+        .message-bubble {
+            display: inline-block;
+            padding: 14px 18px;
+            border-radius: var(--radius-lg);
+            line-height: 1.65;
+            font-size: 14px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            position: relative;
+        }
+
+        .message.user .message-bubble {
+            background: var(--user-bg);
+            color: var(--user-text);
+            border-bottom-right-radius: 6px;
+        }
+
+        .message.assistant .message-bubble {
+            background: var(--assistant-bg);
+            border-bottom-left-radius: 6px;
+            color: var(--text);
+        }
+
+        /* Streaming cursor */
+        .message-bubble.streaming::after {
+            content: '';
+            display: inline-block;
+            width: 2px;
+            height: 16px;
+            background: var(--text-secondary);
+            margin-left: 2px;
+            vertical-align: text-bottom;
+            animation: blink 0.8s step-end infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
+        /* Message meta */
+        .message-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            color: var(--text-light);
+            padding: 0 4px;
+        }
+
+        .message.user .message-meta {
+            flex-direction: row-reverse;
+        }
+
+        .message-meta .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 8px;
+            background: var(--border-light);
+            border-radius: 4px;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+
+        .message-meta .tag svg {
+            width: 10px;
+            height: 10px;
+        }
+
+        .message-meta .time {
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* Typing indicator */
+        .typing-indicator {
+            display: flex;
+            gap: 4px;
+            padding: 14px 18px;
+            background: var(--assistant-bg);
+            border-radius: var(--radius-lg);
+            border-bottom-left-radius: 6px;
+        }
+
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: var(--text-light);
+            border-radius: 50%;
+            animation: typingBounce 1.4s ease-in-out infinite;
+        }
+
+        .typing-indicator span:nth-child(1) { animation-delay: 0ms; }
+        .typing-indicator span:nth-child(2) { animation-delay: 200ms; }
+        .typing-indicator span:nth-child(3) { animation-delay: 400ms; }
+
+        @keyframes typingBounce {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-6px); }
+        }
+
+        /* Empty state */
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            gap: 16px;
+            padding: 40px;
+        }
+
+        .empty-state-icon {
+            width: 64px;
+            height: 64px;
+            background: var(--border-light);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .empty-state-icon svg {
+            width: 28px;
+            height: 28px;
+            color: var(--text-light);
+        }
+
+        .empty-state-text {
+            text-align: center;
+        }
+
+        .empty-state-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        .empty-state-subtitle {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* ═══════════════════════════════════════
+           INPUT AREA
+        ═══════════════════════════════════════ */
+        .input-area {
+            padding: 16px 24px 24px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+        }
+
+        .input-wrapper {
+            max-width: 820px;
+            margin: 0 auto;
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .input-container {
+            flex: 1;
+            position: relative;
+        }
+
+        #messageInput {
+            width: 100%;
+            padding: 14px 18px;
+            border: 1.5px solid var(--border);
+            border-radius: var(--radius-md);
+            font-size: 14px;
+            outline: none;
+            transition: all var(--transition);
+            resize: none;
+            font-family: inherit;
+            line-height: 1.5;
+            background: var(--bg-secondary);
+        }
+
+        #messageInput:hover {
+            border-color: var(--text-light);
+        }
+
+        #messageInput:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 4px rgba(0,0,0,0.04);
+        }
+
+        #messageInput::placeholder {
+            color: var(--text-light);
+        }
+
+        .input-hint {
+            position: absolute;
+            right: 14px;
+            bottom: 12px;
+            font-size: 11px;
+            color: var(--text-light);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity var(--transition);
+        }
+
+        #messageInput:focus ~ .input-hint {
+            opacity: 1;
+        }
+
+        #sendBtn {
+            width: 48px;
+            height: 48px;
+            border: none;
+            background: var(--accent);
+            color: white;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all var(--transition);
+            position: relative;
+            overflow: hidden;
+        }
+
+        #sendBtn::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, transparent 0%, rgba(255,255,255,0.1) 100%);
+            opacity: 0;
+            transition: opacity var(--transition);
+        }
+
+        #sendBtn:hover:not(:disabled) {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
+        }
+
+        #sendBtn:hover:not(:disabled)::before {
+            opacity: 1;
+        }
+
+        #sendBtn:active:not(:disabled) {
+            transform: translateY(0) scale(0.98);
+        }
+
+        #sendBtn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        #sendBtn svg {
+            width: 20px;
+            height: 20px;
+            transition: transform var(--transition);
+        }
+
+        #sendBtn:hover:not(:disabled) svg {
+            transform: translateY(-1px);
+        }
+
+        /* Loading state */
+        #sendBtn.loading svg {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        /* ═══════════════════════════════════════
+           SCROLLBAR
+        ═══════════════════════════════════════ */
+        .messages::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .messages::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .messages::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+            border: 2px solid var(--bg);
+        }
+
+        .messages::-webkit-scrollbar-thumb:hover {
+            background: var(--text-light);
+        }
+
+        /* ═══════════════════════════════════════
+           RESPONSIVE
+        ═══════════════════════════════════════ */
+        @media (max-width: 768px) {
+            .header {
+                padding: 12px 16px;
+                flex-wrap: wrap;
+                gap: 12px;
+            }
+
+            .header-subtitle,
+            .status-indicators {
+                display: none;
+            }
+
+            .messages {
+                padding: 20px 16px;
+                gap: 20px;
+            }
+
+            .input-area {
+                padding: 12px 16px 20px;
+            }
+
+            .message-bubble {
+                padding: 12px 14px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">
+                <i data-lucide="sparkles"></i>
+            </div>
+            <div class="header-title">
+                <h1>LLM Stream</h1>
+                <span class="header-subtitle">Streaming via RabbitMQ</span>
+            </div>
+        </div>
+
+        <div class="mode-toggle">
+            <button class="mode-btn active" data-mode="sse">
+                <i data-lucide="radio"></i>
+                RabbitMQ
+            </button>
+            <button class="mode-btn" data-mode="direct">
+                <i data-lucide="zap"></i>
+                Direct
+            </button>
+        </div>
+
+        <div class="status-indicators">
+            <div class="status">
+                <span class="status-dot" id="apiStatus"></span>
+                API
+            </div>
+            <div class="status">
+                <span class="status-dot" id="mqStatus"></span>
+                Queue
+            </div>
+            <div class="status">
+                <span class="status-dot" id="streamStatus"></span>
+                Stream
+            </div>
+        </div>
+    </header>
+
+    <main class="messages" id="messages">
+        <div class="empty-state" id="emptyState">
+            <div class="empty-state-icon">
+                <i data-lucide="message-circle"></i>
+            </div>
+            <div class="empty-state-text">
+                <div class="empty-state-title">Démarre une conversation</div>
+                <div class="empty-state-subtitle">Les réponses arrivent en streaming via RabbitMQ</div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="input-area">
+        <div class="input-wrapper">
+            <div class="input-container">
+                <input 
+                    type="text" 
+                    id="messageInput" 
+                    placeholder="Écris ton message..."
+                    autocomplete="off"
+                >
+                <span class="input-hint">Entrée ↵</span>
+            </div>
+            <button id="sendBtn">
+                <i data-lucide="arrow-up"></i>
+            </button>
+        </div>
+    </footer>
+
+    <script>
+        lucide.createIcons();
+
+        const API_URL = 'http://localhost:8007';
+        let currentMode = 'sse';
+
+        const messagesEl = document.getElementById('messages');
+        const emptyState = document.getElementById('emptyState');
+        const inputEl = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const apiStatus = document.getElementById('apiStatus');
+        const mqStatus = document.getElementById('mqStatus');
+        const streamStatus = document.getElementById('streamStatus');
+
+        // Mode toggle
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentMode = btn.dataset.mode;
+            });
+        });
+
+        // Health check
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${API_URL}/health`);
+                if (res.ok) {
+                    apiStatus.className = 'status-dot ok';
+                    mqStatus.className = 'status-dot ok';
+                }
+            } catch {
+                apiStatus.className = 'status-dot error';
+                mqStatus.className = 'status-dot error';
+            }
+        }
+        checkHealth();
+        setInterval(checkHealth, 30000);
+
+        function hideEmptyState() {
+            if (emptyState) emptyState.style.display = 'none';
+        }
+
+        function formatTime() {
+            return new Date().toLocaleTimeString('fr-FR', { 
+                hour: '2-digit', 
+                minute: '2-digit' 
+            });
+        }
+
+        function addMessage(text, type, meta = null) {
+            hideEmptyState();
+            
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            
+            const iconName = type === 'user' ? 'user' : 'sparkles';
+            const time = formatTime();
+            
+            let metaHtml = `<span class="time">${time}</span>`;
+            if (meta) {
+                const tagIcon = meta.includes('RabbitMQ') ? 'radio' : 'zap';
+                metaHtml += `<span class="tag"><i data-lucide="${tagIcon}"></i>${meta}</span>`;
+            }
+            
+            div.innerHTML = `
+                <div class="avatar"><i data-lucide="${iconName}"></i></div>
+                <div class="message-content">
+                    <div class="message-bubble">${text}</div>
+                    <div class="message-meta">${metaHtml}</div>
+                </div>
+            `;
+            
+            messagesEl.appendChild(div);
+            lucide.createIcons();
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            return div.querySelector('.message-bubble');
+        }
+
+        function addTypingIndicator() {
+            hideEmptyState();
+            
+            const div = document.createElement('div');
+            div.className = 'message assistant';
+            div.id = 'typingIndicator';
+            
+            div.innerHTML = `
+                <div class="avatar"><i data-lucide="sparkles"></i></div>
+                <div class="message-content">
+                    <div class="typing-indicator">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                </div>
+            `;
+            
+            messagesEl.appendChild(div);
+            lucide.createIcons();
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function removeTypingIndicator() {
+            const indicator = document.getElementById('typingIndicator');
+            if (indicator) indicator.remove();
+        }
+
+        async function sendMessage() {
+            const message = inputEl.value.trim();
+            if (!message) return;
+
+            inputEl.value = '';
+            sendBtn.disabled = true;
+            sendBtn.classList.add('loading');
+            sendBtn.innerHTML = '<i data-lucide="loader-2"></i>';
+            lucide.createIcons();
+            streamStatus.className = 'status-dot active';
+
+            addMessage(message, 'user');
+            addTypingIndicator();
+
+            if (currentMode === 'sse') {
+                await sendWithSSE(message);
+            } else {
+                await sendDirect(message);
+            }
+
+            sendBtn.disabled = false;
+            sendBtn.classList.remove('loading');
+            sendBtn.innerHTML = '<i data-lucide="arrow-up"></i>';
+            lucide.createIcons();
+            streamStatus.className = 'status-dot ok';
+        }
+
+        async function sendWithSSE(message) {
+            try {
+                const res = await fetch(`${API_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                const sessionId = res.headers.get('X-Session-ID');
+                if (!sessionId) {
+                    removeTypingIndicator();
+                    addMessage('Erreur: Session manquante', 'assistant');
+                    return;
+                }
+
+                removeTypingIndicator();
+                const bubble = addMessage('', 'assistant', 'RabbitMQ');
+                bubble.classList.add('streaming');
+                let fullText = '';
+
+                const eventSource = new EventSource(`${API_URL}/stream/${sessionId}`);
+
+                eventSource.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.chunk) {
+                        fullText += data.chunk;
+                        bubble.textContent = fullText;
+                        messagesEl.scrollTop = messagesEl.scrollHeight;
+                    }
+                    if (data.type === 'done') {
+                        bubble.classList.remove('streaming');
+                        eventSource.close();
+                    }
+                };
+
+                eventSource.onerror = () => {
+                    bubble.classList.remove('streaming');
+                    eventSource.close();
+                    if (!fullText) bubble.textContent = 'Erreur de connexion';
+                };
+
+            } catch (err) {
+                removeTypingIndicator();
+                addMessage(`Erreur: ${err.message}`, 'assistant');
+            }
+        }
+
+        async function sendDirect(message) {
+            try {
+                const res = await fetch(`${API_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                removeTypingIndicator();
+                const bubble = addMessage('', 'assistant', 'Direct');
+                bubble.classList.add('streaming');
+                let fullText = '';
+
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    fullText += decoder.decode(value, { stream: true });
+                    bubble.textContent = fullText;
+                    messagesEl.scrollTop = messagesEl.scrollHeight;
+                }
+
+                bubble.classList.remove('streaming');
+
+            } catch (err) {
+                removeTypingIndicator();
+                addMessage(`Erreur: ${err.message}`, 'assistant');
+            }
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        inputEl.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        inputEl.focus();
+    </script>
+</body>
+</html>
