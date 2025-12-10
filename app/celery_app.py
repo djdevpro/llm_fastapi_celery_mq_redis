@@ -3,10 +3,21 @@ Configuration Celery avec Redis.
 
 Lancer le worker :
     celery -A app.celery_app worker --loglevel=info --concurrency=4
+    
+Toute la config est pilotée via les variables d'environnement (voir config.py)
 """
 from celery import Celery
 from kombu import Queue
-from app.config import BROKER_URL, RESULT_BACKEND
+from app.config import (
+    BROKER_URL,
+    RESULT_BACKEND,
+    CELERY_RATE_LIMIT,
+    CELERY_TASK_TIME_LIMIT,
+    CELERY_TASK_SOFT_TIME_LIMIT,
+    CELERY_RESULT_EXPIRES,
+    CELERY_PREFETCH_MULTIPLIER,
+    CELERY_QUEUES,
+)
 
 # Celery app
 celery = Celery(
@@ -17,6 +28,12 @@ celery = Celery(
 )
 
 print(f"[Celery] Broker: {BROKER_URL[:30]}...")
+print(f"[Celery] Rate limit: {CELERY_RATE_LIMIT}")
+print(f"[Celery] Queues: {CELERY_QUEUES}")
+
+# Parser les queues depuis la config
+queue_names = [q.strip() for q in CELERY_QUEUES.split(",") if q.strip()]
+task_queues = tuple(Queue(name, routing_key=name) for name in queue_names)
 
 # Configuration
 celery.conf.update(
@@ -29,27 +46,26 @@ celery.conf.update(
     timezone="UTC",
     enable_utc=True,
     
-    # Task settings
+    # Task settings (depuis env)
     task_track_started=True,
-    task_time_limit=300,  # 5 min max par tâche
-    task_soft_time_limit=270,  # Warning à 4.5 min
+    task_time_limit=CELERY_TASK_TIME_LIMIT,
+    task_soft_time_limit=CELERY_TASK_SOFT_TIME_LIMIT,
     
     # Results
-    result_expires=3600,  # 1h de rétention
+    result_expires=CELERY_RESULT_EXPIRES,
     
-    # Queues avec priorités
-    task_queues=(
-        Queue("high", routing_key="high"),
-        Queue("default", routing_key="default"),
-        Queue("low", routing_key="low"),
-    ),
-    task_default_queue="default",
-    task_default_routing_key="default",
+    # Queues avec priorités (depuis env)
+    task_queues=task_queues,
+    task_default_queue="default" if "default" in queue_names else queue_names[0],
+    task_default_routing_key="default" if "default" in queue_names else queue_names[0],
     
-    # Rate limiting global (backup)
+    # Rate limiting natif Celery (depuis env)
     task_annotations={
         "app.tasks.llm_tasks.chat_completion": {
-            "rate_limit": "100/m"
+            "rate_limit": CELERY_RATE_LIMIT
+        },
+        "app.tasks.llm_tasks.batch_embeddings": {
+            "rate_limit": CELERY_RATE_LIMIT
         }
     },
     
@@ -57,8 +73,8 @@ celery.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     
-    # Concurrency control
-    worker_prefetch_multiplier=1,
+    # Concurrency control (depuis env)
+    worker_prefetch_multiplier=CELERY_PREFETCH_MULTIPLIER,
     
     # Startup retry
     broker_connection_retry_on_startup=True,
@@ -67,7 +83,3 @@ celery.conf.update(
 
 if __name__ == "__main__":
     celery.start()
-
-
-
-

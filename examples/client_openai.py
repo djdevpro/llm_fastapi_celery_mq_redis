@@ -186,36 +186,16 @@ def chat_json_schema():
 
 
 # ============================================================
-# EXEMPLE 6: Liste des modèles
-# ============================================================
-
-def list_models():
-    print("=" * 50)
-    print("EXEMPLE 6: Liste des modèles")
-    print("=" * 50)
-    
-    models = client.models.list()
-    for model in models.data[:10]:  # Limiter à 10
-        print(f"  - {model.id}")
-    print("  ...")
-    print()
-
-
-# ============================================================
 # MAIN
 # ============================================================
 
 if __name__ == "__main__":
     print("\n🚀 Client OpenAI → Proxy local (http://localhost:8007/v1)\n")
-    
-    # Liste des modèles
-    #list_models()
 
     # JSON format
     chat_json_format()
     
     # JSON schema (structured outputs)
     chat_json_schema()
-    
     
     print("✅ Terminé!")

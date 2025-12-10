@@ -30,7 +30,7 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage
 
-from app.config import REDIS_URL, OPENAI_API_KEY
+from app.config import REDIS_URL, OPENAI_API_KEY, API_TIMEOUT
 from app.tasks.llm_tasks import chat_completion as chat_completion_task
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Proxy"])
@@ -209,13 +209,12 @@ async def _wait_celery_result(task_id: str, request_id: str, model: str):
     
     result = AsyncResult(task_id, app=celery)
     
-    # Polling async du résultat
-    timeout = 120
+    # Polling async du résultat (timeout depuis config)
     start = time.time()
     
     while not result.ready():
-        if time.time() - start > timeout:
-            raise HTTPException(504, "Request timeout")
+        if time.time() - start > API_TIMEOUT:
+            raise HTTPException(504, f"Request timeout after {API_TIMEOUT}s")
         await asyncio.sleep(0.5)
     
     if result.failed():

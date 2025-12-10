@@ -203,9 +203,9 @@ async def get_task_status(task_id: str):
 @app.get("/stream/{session_id}")
 async def stream_sse(
     session_id: str,
-    timeout: int = Query(default=120, le=300)
+    timeout: int = Query(default=900, le=1800)
 ):
-    """SSE streaming depuis Redis pub/sub."""
+    """SSE streaming depuis Redis pub/sub. Timeout configurable (défaut 15 min, max 30 min)."""
     async def event_generator():
         channel = f"llm:stream:{session_id}"
         pubsub = redis_client.pubsub()

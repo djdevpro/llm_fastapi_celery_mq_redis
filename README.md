@@ -155,9 +155,8 @@ API_URL=http://localhost:8007
 # === MONITORING ===
 FLOWER_PORT=5555
 
-# === RATE LIMITING ===
-LLM_RPM=500
-LLM_TPM=100000
+# === RATE LIMITING (Celery natif) ===
+CELERY_RATE_LIMIT=100/m
 ```
 
 ---
